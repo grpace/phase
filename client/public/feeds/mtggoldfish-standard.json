@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-11-01T00:00:00Z",
+  "updated": "2026-11-03T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -123,280 +123,6 @@
         {
           "count": 1,
           "name": "Mole Man, Moloid Master"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 4,
-          "name": "Dream Beavers"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 1,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 2,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 3,
-          "name": "We Say Thee Nay!"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Yuriko, Hope from the Shadows"
-        },
-        {
-          "count": 2,
-          "name": "Shipwreck Marsh"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "The Wondrous Wasp"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Curiosity"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 3,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 3,
-          "name": "Spyglass Siren"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 3,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 3,
-          "name": "Gloomlake Verge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Annul"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "The End"
-        },
-        {
-          "count": 2,
-          "name": "Flashfreeze"
-        }
-      ]
-    },
-    {
-      "name": "Lifegain",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "B"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Enlightened Confidant"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 1,
-          "name": "Dalkovan Encampment"
-        },
-        {
-          "count": 2,
-          "name": "Aunt May"
-        },
-        {
-          "count": 4,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Amalia Benavides Aguirre"
-        },
-        {
-          "count": 4,
-          "name": "Haliya, Guided by Light"
-        },
-        {
-          "count": 4,
-          "name": "Case of the Uneaten Feast"
-        },
-        {
-          "count": 4,
-          "name": "Multiversal Passage"
-        },
-        {
-          "count": 4,
-          "name": "Moseo, Vein's New Dean"
-        },
-        {
-          "count": 3,
-          "name": "Lunar Convocation"
-        },
-        {
-          "count": 4,
-          "name": "Hinterland Sanctifier"
-        },
-        {
-          "count": 4,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Liliana the Faultless"
-        },
-        {
-          "count": 3,
-          "name": "Starscape Cleric"
-        },
-        {
-          "count": 2,
-          "name": "Deep-Cavern Bat"
-        },
-        {
-          "count": 1,
-          "name": "Great Arashin City"
-        },
-        {
-          "count": 4,
-          "name": "Godless Shrine"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Phyrexian Arena"
-        },
-        {
-          "count": 1,
-          "name": "Deep-Cavern Bat"
-        },
-        {
-          "count": 2,
-          "name": "Shattered Acolyte"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Pyrrhic Strike"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Vicious Rivalry"
-        },
-        {
-          "count": 1,
-          "name": "Lunar Convocation"
-        },
-        {
-          "count": 1,
-          "name": "Space-Time Anomaly"
         }
       ]
     },
@@ -540,6 +266,141 @@
       ]
     },
     {
+      "name": "Lifegain",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Enlightened Confidant"
+        },
+        {
+          "count": 4,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 1,
+          "name": "Dalkovan Encampment"
+        },
+        {
+          "count": 2,
+          "name": "Aunt May"
+        },
+        {
+          "count": 4,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Amalia Benavides Aguirre"
+        },
+        {
+          "count": 4,
+          "name": "Haliya, Guided by Light"
+        },
+        {
+          "count": 4,
+          "name": "Case of the Uneaten Feast"
+        },
+        {
+          "count": 4,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 4,
+          "name": "Moseo, Vein's New Dean"
+        },
+        {
+          "count": 3,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 4,
+          "name": "Hinterland Sanctifier"
+        },
+        {
+          "count": 4,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Liliana the Faultless"
+        },
+        {
+          "count": 3,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 2,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 1,
+          "name": "Great Arashin City"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Phyrexian Arena"
+        },
+        {
+          "count": 1,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 2,
+          "name": "Shattered Acolyte"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Pyrrhic Strike"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Vicious Rivalry"
+        },
+        {
+          "count": 1,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 1,
+          "name": "Space-Time Anomaly"
+        }
+      ]
+    },
+    {
       "name": "Izzet Spellementals",
       "author": "MTGGoldfish",
       "colors": [
@@ -670,16 +531,12 @@
           "name": "Deserted Beach"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Erode"
         },
         {
           "count": 2,
           "name": "Theorist's Sanctum"
-        },
-        {
-          "count": 2,
-          "name": "Three Steps Ahead"
         },
         {
           "count": 4,
@@ -706,6 +563,10 @@
           "name": "Island"
         },
         {
+          "count": 1,
+          "name": "Mathemagics"
+        },
+        {
           "count": 4,
           "name": "No More Lies"
         },
@@ -718,7 +579,7 @@
           "name": "Day of Judgment"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Meticulous Archive"
         },
         {
@@ -735,7 +596,11 @@
         },
         {
           "count": 1,
-          "name": "Riverchurn Monument"
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Theorist's Proxy"
         },
         {
           "count": 4,
@@ -744,8 +609,20 @@
       ],
       "sideboard": [
         {
+          "count": 1,
+          "name": "Ultima"
+        },
+        {
           "count": 2,
-          "name": "Sphinx of the Final Word"
+          "name": "King T'Challa"
+        },
+        {
+          "count": 4,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 1,
+          "name": "Rest in Peace"
         },
         {
           "count": 1,
@@ -753,31 +630,15 @@
         },
         {
           "count": 2,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
+          "name": "Cavern of Souls"
         },
         {
           "count": 2,
-          "name": "Torpor Orb"
-        },
-        {
-          "count": 2,
-          "name": "Rest in Peace"
+          "name": "Emeritus of Ideation"
         },
         {
           "count": 2,
           "name": "Captain Marvel, Earth's Protector"
-        },
-        {
-          "count": 1,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Pinnacle Starcage"
         }
       ]
     },
