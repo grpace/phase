@@ -72,3 +72,48 @@ fn turn_the_earth_puts_each_target_into_its_owners_library_then_each_owner_shuff
     assert!(shuffles_for(events, P1) >= 1, "{events:?}");
     outcome.assert_life_delta(P0, 2);
 }
+
+/// CR 115.6 + CR 608.2c + CR 701.24a: choosing zero targets is legal for "up to
+/// three". "The owners of those cards" then names no player, so the Shuffle
+/// instruction shuffles no library, while "You gain 2 life" — which does not
+/// refer to the chosen cards — still happens.
+#[test]
+fn turn_the_earth_with_zero_targets_shuffles_no_library_and_still_gains_two() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Turn the Earth", false, TURN_THE_EARTH)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    // A legal target exists in each graveyard, so declining is a real choice.
+    let mine = scenario
+        .add_creature_to_graveyard(P0, "P0 Graveyard Bear", 2, 2)
+        .id();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "P1 Graveyard Bear", 2, 2)
+        .id();
+    scenario.add_card_to_library_top(P0, "P0 Library Card");
+    scenario.add_card_to_library_top(P1, "P1 Library Card");
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).resolve();
+    let state = outcome.state();
+    let events = outcome.events();
+
+    assert_eq!(
+        state.objects[&spell].zone,
+        Zone::Graveyard,
+        "the spell resolved"
+    );
+    assert_eq!(state.objects[&mine].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&theirs].zone, Zone::Graveyard);
+    assert_eq!(shuffles_for(events, P0), 0, "{events:?}");
+    assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+    outcome.assert_life_delta(P0, 2);
+}

@@ -996,15 +996,23 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 /// per CR 108.3 (owner is the player who started the game with the card in their
 /// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
 /// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
-/// parent-target slot has been bound. Falls back to last-known information (CR
-/// 608.2h) when the object has ceased to exist. Returns `None` only if the
-/// ability has no targets, or an object target is absent from both the live
-/// object map and the LKI cache.
+/// parent-target slot has been bound. The first element of
+/// [`parent_target_owners`], so the singular and plural readings share one
+/// lookup and one fallback policy.
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
-    if let Some(player) = ability.targets.iter().find_map(|t| match t {
-        // CR 608.2h (issue #1582): Mirror the controller lookup — fall back to
-        // last-known information so "its owner" still resolves after the
-        // referenced object (e.g. a bounced token) has ceased to exist.
+    parent_target_owners(ability, state).first().copied()
+}
+
+/// CR 108.3 + CR 608.2c + CR 608.2h: The distinct owners of an ability's parent
+/// object targets, in target order — "the owners of those cards". Player targets
+/// name no owner. An object that has ceased to exist answers through last-known
+/// information (issue #1582: "its owner" still resolves after a bounced token is
+/// gone). When no object target resolves to an owner, the anaphor falls back to
+/// the parent instruction's stamped referent snapshot (CR 400.7j), mirroring
+/// `parent_target_controller`. Empty only when neither yields an owner.
+pub fn parent_target_owners(ability: &ResolvedAbility, state: &GameState) -> Vec<PlayerId> {
+    let mut owners = Vec::new();
+    for owner in ability.targets.iter().filter_map(|target| match target {
         TargetRef::Object(id) => state
             .objects
             .get(id)
@@ -1012,14 +1020,20 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
             .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
         TargetRef::Player(_) => None,
     }) {
-        return Some(player);
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
     }
-
-    // CR 608.2c + CR 400.7j: Mirror the controller fallback for owner anaphors.
-    ability
-        .effect_context_object
-        .as_ref()
-        .map(|snapshot| snapshot.lki.owner)
+    if owners.is_empty() {
+        // CR 608.2c + CR 400.7j: Mirror the controller fallback for owner anaphors.
+        owners.extend(
+            ability
+                .effect_context_object
+                .as_ref()
+                .map(|snapshot| snapshot.lki.owner),
+        );
+    }
+    owners
 }
 
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {

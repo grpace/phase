@@ -4,7 +4,6 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::RandomDraw;
-use crate::types::player::PlayerId;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -61,10 +60,18 @@ pub fn resolve(
     // their libraries" — a `ParentTargetOwner` shuffle names every distinct
     // owner of the parent's object targets, and each of those players shuffles
     // their own library once (APNAP order, CR 101.4). A single-object referent
-    // ("its owner's library") is the one-owner case of the same rule. With no
-    // object targets the anaphor binds through the context fallbacks below.
+    // ("its owner's library") is the one-owner case of the same rule. When the
+    // anaphor names no owner it binds through the context fallbacks below.
     let parent_owners = match &shuffle_target {
-        TargetFilter::ParentTargetOwner => parent_target_owners(state, ability),
+        TargetFilter::ParentTargetOwner => {
+            let owners = crate::game::ability_utils::parent_target_owners(ability, state);
+            (!owners.is_empty()).then(|| {
+                crate::game::players::apnap_order(state)
+                    .into_iter()
+                    .filter(|player| owners.contains(player))
+                    .collect::<Vec<_>>()
+            })
+        }
         _ => None,
     };
     let target_players = if let Some(owners) = parent_owners {
@@ -137,40 +144,6 @@ pub fn resolve(
     }
 
     Ok(())
-}
-
-/// CR 108.3 + CR 608.2c + CR 101.4: The distinct owners of the parent
-/// instruction's object targets, in APNAP order. Player targets are skipped
-/// (mirroring [`crate::game::ability_utils::parent_target_owner`]), and an
-/// object that ceased to exist answers through last-known information
-/// (CR 608.2h). `None` when the ability carries no object target, so the
-/// caller falls back to the context referent (a dies trigger's "it").
-fn parent_target_owners(state: &GameState, ability: &ResolvedAbility) -> Option<Vec<PlayerId>> {
-    if !ability
-        .targets
-        .iter()
-        .any(|target| matches!(target, TargetRef::Object(_)))
-    {
-        return None;
-    }
-    let owners: Vec<PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(id) => state
-                .objects
-                .get(id)
-                .map(|obj| obj.owner)
-                .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
-    Some(
-        crate::game::players::apnap_order(state)
-            .into_iter()
-            .filter(|player| owners.contains(player))
-            .collect(),
-    )
 }
 
 #[cfg(test)]

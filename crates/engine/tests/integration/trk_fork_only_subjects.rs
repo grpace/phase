@@ -882,6 +882,17 @@ fn new_new_york_vehicles_are_not_creatures_until_crewed() {
             !obj.card_types.core_types.contains(&CoreType::Creature),
             "a Vehicle is not a creature until crewed"
         );
+        // CR 208.3 + CR 208.3a: a noncreature permanent has no power or
+        // toughness, but an effect that sets its base P/T is still created and
+        // does nothing until it becomes a creature. The engine keeps P/T values
+        // on a noncreature `GameObject` (a printed Vehicle's too) rather than
+        // clearing them, so the latent 3/3 is recorded here; what CR 208.3
+        // requires is the missing Creature type asserted above.
+        assert_eq!(
+            (obj.power, obj.toughness),
+            (Some(3), Some(3)),
+            "the setting effect is created while the Vehicle is noncreature"
+        );
         assert!(obj.has_keyword(&Keyword::Flying));
         assert!(obj.has_keyword(&Keyword::Haste));
         assert!(obj.has_keyword(&Keyword::Crew {
