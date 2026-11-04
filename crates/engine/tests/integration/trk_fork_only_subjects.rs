@@ -14,8 +14,10 @@
 //! - Dr. Leonard "Bones" McCoy — an embedded "When it dies this turn, …"
 //!   delayed trigger keeps its trailing "at the beginning of the next end
 //!   step" on its own body (CR 603.7), and its bare "it" names the creature
-//!   the mode just chose (CR 608.2c). Desperate Measures covers the same
-//!   pronoun binding on an instant.
+//!   the mode just chose (CR 608.2c). The watch is bounded to the turn
+//!   (CR 603.7b) and is not installed when no creature was chosen.
+//!   Desperate Measures and Turn Inside Out cover the same pronoun binding and
+//!   duration on instants.
 //!
 //! Every test builds its card from the verbatim Oracle text through
 //! `from_oracle_text`, so it exercises the same parser the card-data export
@@ -1241,13 +1243,10 @@ fn mccoy_mode_two_returns_nothing_when_the_chosen_creature_survives() {
     assert_eq!(plus_one_counters(&runner, patient), 0);
 }
 
-/// Known engine gap, not a parser defect: `DelayedTriggerCondition::WhenDies`
-/// carries no lifetime, so cleanup never prunes an unfired "dies this turn"
-/// watch (CR 603.7b) and a later-turn death still fires it. This affects the
-/// whole "dies this turn" delayed-trigger class (Cryptek, Scintillating
-/// Encore, Desperate Measures, ...), so it is left for a dedicated change.
+/// CR 603.7b: "When it dies this turn" has a stated duration, so an unfired
+/// watch expires at the end of the turn that created it and a death on a later
+/// turn returns nothing.
 #[test]
-#[ignore = "WhenDies has no this-turn lifetime; unfired watches are never pruned (CR 603.7b)"]
 fn mccoy_mode_two_does_not_return_a_creature_that_dies_on_a_later_turn() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1276,6 +1275,48 @@ fn mccoy_mode_two_does_not_return_a_creature_that_dies_on_a_later_turn() {
         Zone::Graveyard,
         "a death on a later turn returns nothing"
     );
+}
+
+/// CR 601.2c + CR 603.7c: "up to one" lets mode two choose no creature. The
+/// watch then refers to nothing and must not be installed — it must never
+/// widen to every creature — so another creature dying this turn returns
+/// nothing.
+#[test]
+fn mccoy_mode_two_with_no_target_chosen_returns_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let bystander = scenario.add_creature(P1, "Red Shirt", 2, 2).id();
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("select the death-watch mode");
+    let (_, slots) = trigger_target_slots(&runner);
+    assert!(slots[0].optional, "up to one target is optional");
+    assert!(current_slot_legal(&runner).contains(&TargetRef::Object(bystander)));
+    choose(&mut runner, None);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "with no creature chosen, no death watch is installed"
+    );
+
+    bolt(&mut runner, bolt_id, bystander);
+    assert_eq!(runner.state().objects[&bystander].zone, Zone::Graveyard);
+
+    advance_past_turn(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&bystander].zone,
+        Zone::Graveyard,
+        "an unchosen creature's death returns nothing"
+    );
+    assert_eq!(plus_one_counters(&runner, bystander), 0);
 }
 
 #[test]
@@ -1383,4 +1424,142 @@ fn desperate_measures_draws_nothing_when_the_target_dies_under_an_opponent() {
         0,
         "the creature died under its controller P1, not under yours"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Turn Inside Out — same "When it dies this turn" pronoun and duration class
+// ---------------------------------------------------------------------------
+
+const TURN_INSIDE_OUT_NAME: &str = "Turn Inside Out";
+const TURN_INSIDE_OUT_ORACLE: &str = "Target creature gets +3/+0 until end of turn. When it dies this turn, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)";
+
+/// Turn Inside Out in P0's hand aimed at P1's `target`, with a second P1
+/// creature and a Lightning Bolt for each player.
+struct TurnInsideOutTable {
+    runner: GameRunner,
+    spell: ObjectId,
+    target: ObjectId,
+    other: ObjectId,
+    our_bolt: ObjectId,
+    their_bolt: ObjectId,
+}
+
+fn turn_inside_out_table() -> TurnInsideOutTable {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, TURN_INSIDE_OUT_NAME, true, TURN_INSIDE_OUT_ORACLE)
+        .id();
+    let target = scenario.add_creature(P1, "Pumped Ensign", 2, 2).id();
+    let other = scenario.add_creature(P1, "Bystander", 2, 2).id();
+    let our_bolt = scenario.add_bolt_to_hand(P0);
+    let their_bolt = scenario.add_bolt_to_hand(P1);
+    TurnInsideOutTable {
+        runner: scenario.build(),
+        spell,
+        target,
+        other,
+        our_bolt,
+        their_bolt,
+    }
+}
+
+fn battlefield_face_down(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| runner.state().objects[id].face_down)
+        .collect()
+}
+
+#[test]
+fn turn_inside_out_manifests_dread_when_the_target_dies_this_turn() {
+    let TurnInsideOutTable {
+        mut runner,
+        spell,
+        target,
+        our_bolt,
+        ..
+    } = turn_inside_out_table();
+    runner.cast(spell).target_objects(&[target]).resolve();
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the spell installs the death watch"
+    );
+
+    // CR 608.2c: "it" is the target creature. CR 700.4: it dies this turn.
+    bolt(&mut runner, our_bolt, target);
+    assert_eq!(runner.state().objects[&target].zone, Zone::Graveyard);
+
+    // CR 701.62a: manifest dread — the controller chooses one of the top two.
+    let WaitingFor::ManifestDreadChoice { player, cards, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the death watch must fire manifest dread, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(cards.len(), 2);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![cards[0]],
+        })
+        .expect("choose the card to manifest");
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+
+    assert_eq!(battlefield_face_down(&runner), vec![cards[0]]);
+    assert_eq!(runner.state().objects[&cards[0]].controller, P0);
+    assert_eq!(runner.state().objects[&cards[1]].zone, Zone::Graveyard);
+    assert!(runner.state().delayed_triggers.is_empty());
+}
+
+#[test]
+fn turn_inside_out_ignores_other_deaths_and_deaths_on_a_later_turn() {
+    let TurnInsideOutTable {
+        mut runner,
+        spell,
+        target,
+        other,
+        our_bolt,
+        their_bolt,
+    } = turn_inside_out_table();
+    let library_before = runner.state().players[0].library.len();
+    runner.cast(spell).target_objects(&[target]).resolve();
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+
+    // CR 608.2c: the watch is bound to the target, not to any creature.
+    bolt(&mut runner, our_bolt, other);
+    assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "another creature's death neither fires nor spends the watch"
+    );
+
+    // CR 603.7b: "this turn" — the unfired watch expires with the turn.
+    advance_to_next_main_of(&mut runner, P1);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the watch expired at the end of the turn it was created"
+    );
+    bolt(&mut runner, their_bolt, target);
+    assert_eq!(runner.state().objects[&target].zone, Zone::Graveyard);
+    assert_settled(&runner);
+
+    assert!(
+        battlefield_face_down(&runner).is_empty(),
+        "nothing manifested"
+    );
+    // Manifest dread never looked at P0's library (only P1 drew since).
+    assert_eq!(runner.state().players[0].library.len(), library_before);
 }

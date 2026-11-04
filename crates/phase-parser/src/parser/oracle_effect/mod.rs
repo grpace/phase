@@ -2099,12 +2099,45 @@ fn parse_dealt_damage_this_way_dies_trigger(
         return None;
     }
 
+    let mut trigger = delayed_dies_trigger(valid_card);
+    trigger.condition = Some(TriggerCondition::DealtDamageBySourceThisTurn);
+    Some(trigger)
+}
+
+/// CR 700.4: the zone-change matcher a delayed "when <subject> dies" watch
+/// embeds — `subject` put into a graveyard from the battlefield.
+fn delayed_dies_trigger(subject: TargetFilter) -> TriggerDefinition {
     let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
     trigger.origin = Some(Zone::Battlefield);
     trigger.destination = Some(Zone::Graveyard);
-    trigger.valid_card = Some(valid_card);
-    trigger.condition = Some(TriggerCondition::DealtDamageBySourceThisTurn);
-    Some(trigger)
+    trigger.valid_card = Some(subject);
+    trigger
+}
+
+/// CR 115.1: the target a delayed-trigger condition declares itself — its
+/// subject is "target <type phrase>" followed directly by the condition's event
+/// ("target creature dies this turn"). `None` for every other subject, which
+/// refers to an object an earlier clause or the source already supplies.
+fn delayed_condition_declared_target(
+    condition_text: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    tag::<_, _, OracleError<'_>>("target ")
+        .parse(condition_text)
+        .ok()?;
+    let (target, rest) = parse_target_with_ctx(condition_text, ctx);
+    parse_delayed_condition_keyword(rest.trim_start()).ok()?;
+    (!matches!(target, TargetFilter::Any)).then_some(target)
+}
+
+/// CR 603.7b: does a delayed-trigger condition end in the stated duration
+/// "this turn" ("that creature dies this turn", "it dies under your control
+/// this turn")?
+fn delayed_condition_states_this_turn(condition_text: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(condition_text, |input| {
+        value((), (tag::<_, _, OracleError<'_>>("this turn"), eof)).parse(input)
+    })
+    .is_some()
 }
 
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
@@ -5148,12 +5181,14 @@ fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
 }
 
 /// CR 603.7: does this chunk open with an embedded delayed-trigger head
-/// ("when …, …" / "whenever …, …")? Such a chunk is a delayed triggered ability
-/// whose effect is everything after its condition, so every trailing modifier of
-/// the sentence belongs to that effect rather than to the creating clause.
+/// ("when …, …")? Such a chunk is a delayed triggered ability whose effect is
+/// everything after its condition, so every trailing modifier of the sentence
+/// belongs to that effect rather than to the creating clause. The single
+/// authority for the head [`try_parse_inline_delayed_trigger`] accepts, so the
+/// suffix is kept on the text only for a chunk that parser will claim.
 fn opens_embedded_delayed_trigger(text: &str) -> bool {
     let lower = text.to_lowercase();
-    let opens = alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever ")))
+    let opens = tag::<_, _, OracleError<'_>>("when ")
         .parse(lower.as_str())
         .is_ok();
     opens
@@ -5165,10 +5200,7 @@ fn try_parse_inline_delayed_trigger(
     tp: TextPair,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    if tag::<_, _, OracleError<'_>>("when ")
-        .parse(tp.lower)
-        .is_err()
-    {
+    if !opens_embedded_delayed_trigger(tp.lower) {
         return None;
     }
 
@@ -5199,6 +5231,9 @@ fn try_parse_inline_delayed_trigger(
     // single-event `scan_delayed_condition_kind` path, which would otherwise
     // drop the second disjunct.
     let mut self_disjunction = false;
+    // The subject of a "dies this turn" watch, which travels inside a
+    // `WhenNextEvent` trigger rather than a condition filter.
+    let mut dies_this_turn_subject: Option<TargetFilter> = None;
     let condition = if let Some(trigger) =
         parse_dealt_damage_this_way_dies_trigger(condition_text, ctx)
     {
@@ -5226,8 +5261,25 @@ fn try_parse_inline_delayed_trigger(
     } else {
         match scan_delayed_condition_kind(condition_text) {
             Some(DelayedConditionKind::Dies | DelayedConditionKind::PutIntoGraveyard) => {
-                DelayedTriggerCondition::WhenDies {
-                    filter: parse_delayed_subject_filter(condition_text, ctx),
+                let filter = parse_delayed_subject_filter(condition_text, ctx);
+                if delayed_condition_states_this_turn(condition_text) {
+                    // CR 603.7b + CR 700.4: "when <it / that creature> dies this
+                    // turn" carries the stated duration "this turn", so the watch
+                    // is bounded to the creating turn — a death on a later turn
+                    // must not trigger it. `WhenNextEvent { ThisTurn }` is the
+                    // one-shot shape cleanup prunes unfired, and its zone-change
+                    // matcher goes through the creation-time guard that refuses
+                    // an install whose parent target was never chosen (an "up to
+                    // one" target left empty), so the watch can never widen to
+                    // every creature. The subject still binds the inner body.
+                    dies_this_turn_subject = Some(filter.clone());
+                    DelayedTriggerCondition::WhenNextEvent {
+                        trigger: Box::new(delayed_dies_trigger(filter)),
+                        or_trigger: None,
+                        lifetime: DelayedTriggerLifetime::ThisTurn,
+                    }
+                } else {
+                    DelayedTriggerCondition::WhenDies { filter }
                 }
             }
             Some(DelayedConditionKind::LeavesPlay) => {
@@ -5263,7 +5315,7 @@ fn try_parse_inline_delayed_trigger(
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter }
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => Some(filter.clone()),
-        _ => None,
+        _ => dies_this_turn_subject,
     };
     // CR 603.7c: For a self-referential disjunctive trigger, route the inner
     // demonstrative ("that permanent") through the anaphor path (it resolves to
@@ -5278,14 +5330,32 @@ fn try_parse_inline_delayed_trigger(
         rebind_triggering_source_to_parent_target(&mut inner);
     }
 
+    let delayed = Effect::CreateDelayedTrigger {
+        condition,
+        effect: Box::new(inner),
+        uses_tracked_set,
+    };
+    // CR 115.1 + CR 603.7c: a condition whose subject is "target <type phrase>"
+    // ("When target creature other than this creature dies this turn, …",
+    // Adarkar Valkyrie; "When target creature is put into your graveyard this
+    // turn, …", Saffi Eriksdotter) declares that target on the creating ability.
+    // Surface the slot with `TargetOnly`, the shape "Choose target creature.
+    // When that creature dies this turn, …" already lowers to, so the condition's
+    // `ParentTarget` names the chosen object instead of an undeclared parent.
+    if let Some(target) = delayed_condition_declared_target(condition_text, ctx) {
+        return Some(ParsedEffectClause {
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                delayed,
+            ))),
+            ..parsed_clause(Effect::TargetOnly { target })
+        });
+    }
+
     Some(ParsedEffectClause {
         optional_targeting: false,
         unlowered_guard: None,
-        effect: Effect::CreateDelayedTrigger {
-            condition,
-            effect: Box::new(inner),
-            uses_tracked_set,
-        },
+        effect: delayed,
         duration: None,
         sub_ability: None,
         distribute: None,
@@ -5311,8 +5381,16 @@ fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) ->
     // until end of turn. When it dies this turn, …"), the pronoun is that
     // target — the chunk context publishes it as `ParentTarget` — not the
     // ability's source. With no chain-local referent it stays the source.
-    let it_referent = match ctx.object_pronoun_ref {
-        Some(TargetFilter::ParentTarget) => TargetFilter::ParentTarget,
+    //
+    // Only an earlier clause's declared target binds: a trigger-level
+    // `ParentTarget` pin (the blocked attacker of a "becomes blocked"
+    // condition) travels with its `condition_object_antecedent`, and the chunk
+    // context clears that antecedent exactly when a chain-local referent
+    // replaced it.
+    let it_referent = match (&ctx.object_pronoun_ref, ctx.condition_object_antecedent) {
+        (Some(TargetFilter::ParentTarget), None) if ctx.parent_target_available => {
+            TargetFilter::ParentTarget
+        }
         _ => TargetFilter::SelfRef,
     };
     let subject = scan_delayed_subject(condition_text, it_referent).unwrap_or_else(|| {

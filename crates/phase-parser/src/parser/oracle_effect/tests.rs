@@ -29298,6 +29298,32 @@ fn mass_forced_block_filtered_opponents_control() {
 // Item 4: Inline delayed triggers
 // -----------------------------------------------------------------------
 
+/// CR 603.7b + CR 700.4: the subject a "when <subject> dies this turn" watch
+/// matches. The stated duration lowers to a one-shot `WhenNextEvent` bounded to
+/// the creating turn whose embedded matcher is a battlefield-to-graveyard zone
+/// change; panics on any other shape.
+fn dies_this_turn_watch_subject(condition: &DelayedTriggerCondition) -> &TargetFilter {
+    let DelayedTriggerCondition::WhenNextEvent {
+        trigger,
+        or_trigger: None,
+        lifetime: DelayedTriggerLifetime::ThisTurn,
+    } = condition
+    else {
+        panic!("expected a this-turn WhenNextEvent death watch, got {condition:?}");
+    };
+    assert_eq!(
+        trigger.mode,
+        crate::types::triggers::TriggerMode::ChangesZone
+    );
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    assert_eq!(trigger.condition, None);
+    trigger
+        .valid_card
+        .as_ref()
+        .expect("a death watch names its subject")
+}
+
 /// Find the first `CreateDelayedTrigger` along an ability's sub-ability chain.
 fn first_delayed_in_chain(
     def: &AbilityDefinition,
@@ -29323,11 +29349,9 @@ fn embedded_delayed_trigger_keeps_trailing_timing_on_its_body() {
     );
     let (outer, body) = first_delayed_in_chain(&def).expect("a delayed trigger is created");
     assert_eq!(
-        outer,
-        &DelayedTriggerCondition::WhenDies {
-            filter: TargetFilter::ParentTarget
-        },
-        "outer trigger watches the chosen creature"
+        dies_this_turn_watch_subject(outer),
+        &TargetFilter::ParentTarget,
+        "outer trigger watches the chosen creature, this turn only"
     );
     let Effect::CreateDelayedTrigger {
         condition: inner,
@@ -29363,26 +29387,138 @@ fn embedded_delayed_trigger_it_subject_binds_to_nearest_antecedent() {
         AbilityKind::Spell,
     );
     let (condition, _) = first_delayed_in_chain(&after_target).expect("delayed trigger");
-    let DelayedTriggerCondition::WhenDies {
-        filter: TargetFilter::And { filters },
-    } = condition
-    else {
-        panic!("expected WhenDies(And[ParentTarget, you control]), got {condition:?}");
+    let TargetFilter::And { filters } = dies_this_turn_watch_subject(condition) else {
+        panic!("expected And[ParentTarget, you control], got {condition:?}");
     };
     assert_eq!(filters[0], TargetFilter::ParentTarget);
 
     let standalone = parse_effect("When it dies this turn, draw a card");
+    let Effect::CreateDelayedTrigger { condition, .. } = &standalone else {
+        panic!("expected a delayed trigger, got {standalone:?}");
+    };
+    assert_eq!(
+        dies_this_turn_watch_subject(condition),
+        &TargetFilter::SelfRef,
+        "with no antecedent, \"it\" is the source"
+    );
+}
+
+/// CR 603.7b: only a condition that states "this turn" is bounded to the
+/// creating turn. Without the stated duration the watch keeps the open-ended
+/// `WhenDies` shape, so a creature that dies on a later turn still triggers it.
+#[test]
+fn delayed_death_watch_is_turn_bounded_only_with_a_stated_duration() {
+    let bounded = parse_effect("When that creature dies this turn, draw a card");
+    let Effect::CreateDelayedTrigger { condition, .. } = &bounded else {
+        panic!("expected a delayed trigger, got {bounded:?}");
+    };
+    assert_eq!(
+        dies_this_turn_watch_subject(condition),
+        &TargetFilter::ParentTarget
+    );
+
+    let put_into = parse_effect(
+        "When that creature is put into a graveyard this turn, return that card to the battlefield",
+    );
+    let Effect::CreateDelayedTrigger { condition, .. } = &put_into else {
+        panic!("expected a delayed trigger, got {put_into:?}");
+    };
+    assert_eq!(
+        dies_this_turn_watch_subject(condition),
+        &TargetFilter::ParentTarget
+    );
+
+    let open_ended = parse_effect("When that creature dies, draw a card");
     assert!(
         matches!(
-            standalone,
+            open_ended,
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WhenDies {
-                    filter: TargetFilter::SelfRef,
+                    filter: TargetFilter::ParentTarget,
                 },
                 ..
             }
         ),
-        "with no antecedent, \"it\" is the source, got {standalone:?}"
+        "no stated duration keeps WhenDies, got {open_ended:?}"
+    );
+}
+
+/// CR 115.1 + CR 603.7c: a condition whose subject is "target <type phrase>"
+/// declares that target on the creating ability (`TargetOnly`), and the death
+/// watch hung off it refers to the chosen object.
+#[test]
+fn delayed_condition_with_its_own_target_declares_the_slot() {
+    for (text, expect_another) in [
+        (
+            "When target creature other than this creature dies this turn, return that card to the battlefield under your control.",
+            true,
+        ),
+        (
+            "When target creature is put into your graveyard this turn, return that card to the battlefield.",
+            false,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::TargetOnly {
+            target: TargetFilter::Typed(typed),
+        } = &*def.effect
+        else {
+            panic!("expected a declared creature target, got {:?}", def.effect);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature), "{text}");
+        assert_eq!(
+            typed.properties.contains(&FilterProp::Another),
+            expect_another,
+            "{text}: {typed:?}"
+        );
+        let (condition, body) = first_delayed_in_chain(&def).expect("delayed trigger");
+        assert_eq!(
+            dies_this_turn_watch_subject(condition),
+            &TargetFilter::ParentTarget,
+            "{text}"
+        );
+        assert!(
+            matches!(
+                &*body.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{text}: {:?}",
+            body.effect
+        );
+    }
+}
+
+/// CR 608.2c + CR 509.3c: a trigger-level `ParentTarget` pin that names the
+/// blocked attacker (it carries a `condition_object_antecedent`) is not an
+/// earlier clause's declared target, so a bare "it" in an embedded delayed
+/// trigger does not bind to it.
+#[test]
+fn embedded_delayed_trigger_it_ignores_a_trigger_level_parent_target_pin() {
+    let mut ctx = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        condition_object_antecedent: Some(
+            crate::parser::oracle_ir::context::ConditionObjectAntecedent::BlockedAttacker,
+        ),
+        parent_target_available: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        parse_delayed_subject_filter("it dies this turn", &mut ctx),
+        TargetFilter::SelfRef
+    );
+
+    let mut declared = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        parent_target_available: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        parse_delayed_subject_filter("it dies this turn", &mut declared),
+        TargetFilter::ParentTarget
     );
 }
 
@@ -29584,18 +29720,18 @@ fn inline_delayed_tracked_subject_controller_qualifies_each_zone_event() {
 #[test]
 fn inline_delayed_self_subject_control_keeps_bare_self_ref() {
     let effect = parse_effect("When it dies under your control this turn, draw two cards");
-    assert!(
-        matches!(
-            effect,
-            Effect::CreateDelayedTrigger {
-                condition: DelayedTriggerCondition::WhenDies {
-                    filter: TargetFilter::SelfRef,
-                },
-                uses_tracked_set: false,
-                ..
-            }
-        ),
-        "expected a bare SelfRef death condition, got {effect:?}"
+    let Effect::CreateDelayedTrigger {
+        condition,
+        uses_tracked_set: false,
+        ..
+    } = &effect
+    else {
+        panic!("expected an untracked delayed trigger, got {effect:?}");
+    };
+    assert_eq!(
+        dies_this_turn_watch_subject(condition),
+        &TargetFilter::SelfRef,
+        "expected a bare SelfRef death condition"
     );
 }
 
@@ -66768,10 +66904,8 @@ fn delayed_trigger_intervening_if_retains_the_commander_control_gate() {
     // CR 603.7c unchanged-behaviour guard: the fought creature stays the trigger's
     // referent. Restoring the gate must not disturb the already-correct binding.
     assert_eq!(
-        delayed_condition,
-        DelayedTriggerCondition::WhenDies {
-            filter: TargetFilter::ParentTarget
-        },
+        dies_this_turn_watch_subject(&delayed_condition),
+        &TargetFilter::ParentTarget,
         "the delayed trigger must still watch the fought creature"
     );
     assert_eq!(
