@@ -11,6 +11,11 @@
 //!   library (CR 701.24a).
 //! - Ensign Harry Kim, Operations — printed short self-name "Ensign Kim".
 //! - New New York — "become 3/3 Vehicles" adds no creature type (CR 301.7a).
+//! - Dr. Leonard "Bones" McCoy — an embedded "When it dies this turn, …"
+//!   delayed trigger keeps its trailing "at the beginning of the next end
+//!   step" on its own body (CR 603.7), and its bare "it" names the creature
+//!   the mode just chose (CR 608.2c). Desperate Measures covers the same
+//!   pronoun binding on an instant.
 //!
 //! Every test builds its card from the verbatim Oracle text through
 //! `from_oracle_text`, so it exercises the same parser the card-data export
@@ -1057,4 +1062,325 @@ fn kim_activation_removes_counters_from_among_creatures_and_draws() {
     assert_eq!(plus_one_counters(&runner, donor), 0);
     assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Dr. Leonard "Bones" McCoy
+// ---------------------------------------------------------------------------
+
+const MCCOY_NAME: &str = "Dr. Leonard \"Bones\" McCoy";
+const MCCOY_ORACLE: &str = "Flash\nWhen Dr. McCoy enters, choose one —\n• Return target non-Doctor permanent card from your graveyard to your hand.\n• Choose up to one other target creature. When it dies this turn, return that card to the battlefield under its owner's control with a +1/+1 counter on it at the beginning of the next end step.";
+
+fn add_mccoy_to_hand(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand(P0, MCCOY_NAME, 3, 2)
+        .with_mana_cost(ManaCost::zero())
+        .with_subtypes(vec!["Human", "Doctor"])
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Flash"], MCCOY_ORACLE)
+        .id()
+}
+
+/// Seed both libraries so turn-structure advancement never decks a player.
+fn seed_libraries(scenario: &mut GameScenario) {
+    for i in 0..4 {
+        scenario.add_spell_to_library_top(P0, &format!("P0 Library {i}"), true);
+        scenario.add_spell_to_library_top(P1, &format!("P1 Library {i}"), true);
+    }
+}
+
+/// Cast McCoy from hand and stop at its ETB mode choice, asserting the prompt.
+fn cast_mccoy_to_mode_choice(runner: &mut GameRunner, mccoy: ObjectId) {
+    cast_from_hand(runner, mccoy);
+    pass_until_prompt_or_empty(runner);
+    // CR 201.5c + CR 603.6a: "When Dr. McCoy enters" names this card.
+    // CR 700.2b: the controller chooses the mode as the trigger is put on the stack.
+    match &runner.state().waiting_for {
+        WaitingFor::AbilityModeChoice {
+            player,
+            modal,
+            source_id,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, mccoy);
+            assert_eq!(
+                (modal.min_choices, modal.max_choices, modal.mode_count),
+                (1, 1, 2),
+                "choose one of two modes"
+            );
+        }
+        other => panic!("expected McCoy's ETB mode choice, got {other:?}"),
+    }
+    assert_eq!(runner.state().objects[&mccoy].zone, Zone::Battlefield);
+}
+
+/// Choose mode two and answer its "up to one other target creature" slot.
+fn mccoy_mode_two_choose(runner: &mut GameRunner, mccoy: ObjectId, chosen: ObjectId) {
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .expect("select the death-watch mode");
+    let (chooser, slots) = trigger_target_slots(runner);
+    assert_eq!(chooser, P0);
+    assert_eq!(slots.len(), 1);
+    assert!(slots[0].optional, "up to one target is optional");
+    let legal = current_slot_legal(runner);
+    assert!(legal.contains(&TargetRef::Object(chosen)));
+    // "other target creature": McCoy cannot choose itself.
+    assert!(!legal.contains(&TargetRef::Object(mccoy)));
+    choose(runner, Some(chosen));
+    pass_until_prompt_or_empty(runner);
+    assert_settled(runner);
+    // CR 603.7a: resolving the mode creates the death-watch delayed trigger.
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "mode two installs exactly one delayed trigger"
+    );
+}
+
+/// Cast a Lightning Bolt (3 damage) at `victim` through the spell pipeline.
+fn bolt(runner: &mut GameRunner, bolt: ObjectId, victim: ObjectId) {
+    runner.cast(bolt).target_objects(&[victim]).resolve();
+    pass_until_prompt_or_empty(runner);
+}
+
+fn advance_past_turn(runner: &mut GameRunner) {
+    let start_turn = runner.state().turn_number;
+    advance_until(runner, |r| r.state().turn_number > start_turn);
+}
+
+#[test]
+fn mccoy_mode_two_returns_the_died_card_under_its_owners_control_at_end_step() {
+    let mut scenario = GameScenario::new();
+    // CR 702.8a: Flash lets McCoy be cast outside a main phase — here at the
+    // beginning of combat on its controller's turn.
+    scenario.at_phase(Phase::BeginCombat);
+    seed_libraries(&mut scenario);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let patient = scenario.add_creature(P1, "Red Shirt", 2, 2).id();
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    mccoy_mode_two_choose(&mut runner, mccoy, patient);
+
+    bolt(&mut runner, bolt_id, patient);
+    // CR 700.4: the chosen creature died. CR 603.7a: the death trigger has
+    // resolved and created the end-step return, so the card waits in the
+    // graveyard until then.
+    assert_eq!(runner.state().objects[&patient].zone, Zone::Graveyard);
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+
+    advance_past_turn(&mut runner);
+
+    // CR 603.7 + CR 400.7: "that card" is the card that died; it returns at
+    // the beginning of the next end step. CR 110.2: under its OWNER's control
+    // (P1), not the delayed trigger's controller (P0). CR 122.1: with a
+    // +1/+1 counter on it.
+    let returned = &runner.state().objects[&patient];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert_eq!(returned.controller, P1);
+    assert_eq!(plus_one_counters(&runner, patient), 1);
+    assert_eq!(runner.state().objects[&mccoy].zone, Zone::Battlefield);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "both delayed triggers are spent"
+    );
+}
+
+#[test]
+fn mccoy_mode_two_returns_your_own_creature_too() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let ensign = scenario.add_creature(P0, "Ensign", 1, 1).id();
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    mccoy_mode_two_choose(&mut runner, mccoy, ensign);
+    bolt(&mut runner, bolt_id, ensign);
+    assert_eq!(runner.state().objects[&ensign].zone, Zone::Graveyard);
+
+    advance_past_turn(&mut runner);
+
+    let returned = &runner.state().objects[&ensign];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert_eq!(returned.controller, P0);
+    assert_eq!(plus_one_counters(&runner, ensign), 1);
+}
+
+#[test]
+fn mccoy_mode_two_returns_nothing_when_the_chosen_creature_survives() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let patient = scenario.add_creature(P1, "Red Shirt", 2, 2).id();
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    mccoy_mode_two_choose(&mut runner, mccoy, patient);
+    // McCoy itself dies instead. The delayed trigger watches the CHOSEN
+    // creature (CR 608.2c: "it" is the target just chosen), not its source.
+    bolt(&mut runner, bolt_id, mccoy);
+    assert_eq!(runner.state().objects[&mccoy].zone, Zone::Graveyard);
+
+    advance_past_turn(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&mccoy].zone,
+        Zone::Graveyard,
+        "McCoy's own death does not fire the watch"
+    );
+    let patient_obj = &runner.state().objects[&patient];
+    assert_eq!(patient_obj.zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, patient), 0);
+}
+
+/// Known engine gap, not a parser defect: `DelayedTriggerCondition::WhenDies`
+/// carries no lifetime, so cleanup never prunes an unfired "dies this turn"
+/// watch (CR 603.7b) and a later-turn death still fires it. This affects the
+/// whole "dies this turn" delayed-trigger class (Cryptek, Scintillating
+/// Encore, Desperate Measures, ...), so it is left for a dedicated change.
+#[test]
+#[ignore = "WhenDies has no this-turn lifetime; unfired watches are never pruned (CR 603.7b)"]
+fn mccoy_mode_two_does_not_return_a_creature_that_dies_on_a_later_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let patient = scenario.add_creature(P1, "Red Shirt", 2, 2).id();
+    let their_bolt = scenario.add_bolt_to_hand(P1);
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    mccoy_mode_two_choose(&mut runner, mccoy, patient);
+
+    // CR 603.7b: the watch has a stated duration of "this turn".
+    advance_to_next_main_of(&mut runner, P1);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the watch expired at the end of the turn it was created"
+    );
+    bolt(&mut runner, their_bolt, patient);
+    assert_eq!(runner.state().objects[&patient].zone, Zone::Graveyard);
+
+    advance_past_turn(&mut runner);
+
+    assert_eq!(
+        runner.state().objects[&patient].zone,
+        Zone::Graveyard,
+        "a death on a later turn returns nothing"
+    );
+}
+
+#[test]
+fn mccoy_mode_one_returns_a_non_doctor_permanent_card_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mccoy = add_mccoy_to_hand(&mut scenario);
+    let crewman = scenario
+        .add_creature_to_graveyard(P0, "Fallen Crewman", 2, 2)
+        .id();
+    let land = scenario.add_land_to_graveyard(P0, "Razed Outpost").id();
+    let doctor = scenario
+        .add_creature_to_graveyard(P0, "Fallen Doctor", 2, 2)
+        .with_subtypes(vec!["Human", "Doctor"])
+        .id();
+    let instant = scenario
+        .add_spell_to_graveyard(P0, "Spent Order", true)
+        .id();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "Fallen Rival", 2, 2)
+        .id();
+    let mut runner = scenario.build();
+
+    cast_mccoy_to_mode_choice(&mut runner, mccoy);
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("select the return mode");
+
+    let (chooser, slots) = trigger_target_slots(&runner);
+    assert_eq!(chooser, P0);
+    assert_eq!(slots.len(), 1);
+    let legal = current_slot_legal(&runner);
+    // CR 115.1: only a non-Doctor permanent card in YOUR graveyard is legal.
+    assert!(legal.contains(&TargetRef::Object(crewman)));
+    assert!(
+        legal.contains(&TargetRef::Object(land)),
+        "a land is a permanent card"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(doctor)),
+        "Doctor excluded"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(instant)),
+        "nonpermanent excluded"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(theirs)),
+        "opponent's graveyard excluded"
+    );
+    choose(&mut runner, Some(crewman));
+    pass_until_prompt_or_empty(&mut runner);
+
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&crewman].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&doctor].zone, Zone::Graveyard);
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "mode one creates no delayed trigger"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Desperate Measures — same "When it dies … this turn" pronoun class
+// ---------------------------------------------------------------------------
+
+const DESPERATE_MEASURES_NAME: &str = "Desperate Measures";
+const DESPERATE_MEASURES_ORACLE: &str = "Target creature gets +1/-1 until end of turn. When it dies under your control this turn, draw two cards.";
+
+fn desperate_measures_scenario(victim_controller: PlayerId) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    seed_libraries(&mut scenario);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, DESPERATE_MEASURES_NAME, true, DESPERATE_MEASURES_ORACLE)
+        .id();
+    let victim = scenario
+        .add_creature(victim_controller, "Frail Ensign", 1, 1)
+        .id();
+    (scenario.build(), spell, victim)
+}
+
+#[test]
+fn desperate_measures_draws_two_when_the_target_dies_under_your_control() {
+    let (mut runner, spell, victim) = desperate_measures_scenario(P0);
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+    // CR 704.5f: +1/-1 leaves the 1/1 with 0 toughness, so it dies.
+    // CR 608.2c: "it" is the target creature, not the spell.
+    outcome.assert_zone(&[victim], Zone::Graveyard);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().players[0].hand.len(), 2, "drew two cards");
+}
+
+#[test]
+fn desperate_measures_draws_nothing_when_the_target_dies_under_an_opponent() {
+    let (mut runner, spell, victim) = desperate_measures_scenario(P1);
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+    outcome.assert_zone(&[victim], Zone::Graveyard);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        0,
+        "the creature died under its controller P1, not under yours"
+    );
 }

@@ -29298,6 +29298,94 @@ fn mass_forced_block_filtered_opponents_control() {
 // Item 4: Inline delayed triggers
 // -----------------------------------------------------------------------
 
+/// Find the first `CreateDelayedTrigger` along an ability's sub-ability chain.
+fn first_delayed_in_chain(
+    def: &AbilityDefinition,
+) -> Option<(&DelayedTriggerCondition, &AbilityDefinition)> {
+    match &*def.effect {
+        Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } => Some((condition, effect)),
+        _ => def.sub_ability.as_deref().and_then(first_delayed_in_chain),
+    }
+}
+
+/// SHAPE (CR 603.7 + CR 603.7a + CR 608.2c): an embedded delayed trigger owns
+/// its whole sentence, so a trailing "at the beginning of the next end step"
+/// times its BODY — the outer trigger watches the chosen creature's death and
+/// the inner one returns it at end step (Dr. Leonard "Bones" McCoy). The bare
+/// "it" subject names the target the chain just declared, not the source.
+#[test]
+fn embedded_delayed_trigger_keeps_trailing_timing_on_its_body() {
+    let def = parse_effect_chain(
+        "Choose up to one other target creature. When it dies this turn, return that card to the battlefield under its owner's control with a +1/+1 counter on it at the beginning of the next end step.",
+        AbilityKind::Spell,
+    );
+    let (outer, body) = first_delayed_in_chain(&def).expect("a delayed trigger is created");
+    assert_eq!(
+        outer,
+        &DelayedTriggerCondition::WhenDies {
+            filter: TargetFilter::ParentTarget
+        },
+        "outer trigger watches the chosen creature"
+    );
+    let Effect::CreateDelayedTrigger {
+        condition: inner,
+        effect: payload,
+        ..
+    } = &*body.effect
+    else {
+        panic!("the death trigger's body must schedule the end-step return, got {body:?}");
+    };
+    assert_eq!(
+        inner,
+        &DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+    );
+    assert!(
+        matches!(
+            &*payload.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "end-step payload returns the card, got {:?}",
+        payload.effect
+    );
+}
+
+/// CR 608.2c: a bare "it" delayed subject with no chain-local antecedent stays
+/// the source; after a declared target it is that target.
+#[test]
+fn embedded_delayed_trigger_it_subject_binds_to_nearest_antecedent() {
+    let after_target = parse_effect_chain(
+        "Target creature gets +1/-1 until end of turn. When it dies under your control this turn, draw two cards.",
+        AbilityKind::Spell,
+    );
+    let (condition, _) = first_delayed_in_chain(&after_target).expect("delayed trigger");
+    let DelayedTriggerCondition::WhenDies {
+        filter: TargetFilter::And { filters },
+    } = condition
+    else {
+        panic!("expected WhenDies(And[ParentTarget, you control]), got {condition:?}");
+    };
+    assert_eq!(filters[0], TargetFilter::ParentTarget);
+
+    let standalone = parse_effect("When it dies this turn, draw a card");
+    assert!(
+        matches!(
+            standalone,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SelfRef,
+                },
+                ..
+            }
+        ),
+        "with no antecedent, \"it\" is the source, got {standalone:?}"
+    );
+}
+
 #[test]
 fn inline_delayed_trigger_when_dies() {
     let e = parse_effect("When that creature dies, draw a card");

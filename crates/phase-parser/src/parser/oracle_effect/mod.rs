@@ -2012,8 +2012,9 @@ fn parse_delayed_subject_keyword(input: &str) -> nom::IResult<&str, TargetFilter
 
 /// Word-boundary scanner for delayed trigger subject references.
 /// Delegates to `scan_at_word_boundaries` for typed phrases, then falls back
-/// to checking for bare "it" (which can appear at end of string).
-fn scan_delayed_subject(text: &str) -> Option<TargetFilter> {
+/// to checking for bare "it" (which can appear at end of string). A bare "it"
+/// resolves to `it_referent`, the pronoun's antecedent supplied by the caller.
+fn scan_delayed_subject(text: &str, it_referent: TargetFilter) -> Option<TargetFilter> {
     // First try typed subject references via the shared scanner
     if let Some(filter) =
         nom_primitives::scan_at_word_boundaries(text, parse_delayed_subject_keyword)
@@ -2036,7 +2037,7 @@ fn scan_delayed_subject(text: &str) -> Option<TargetFilter> {
     })
     .is_some()
     {
-        return Some(TargetFilter::SelfRef);
+        return Some(it_referent);
     }
     // CR 603.7c: When the condition text doesn't start with an indefinite article
     // ("a"/"an"), it's a definite self-reference — either "~" (normalized), a card
@@ -5088,7 +5089,7 @@ fn parse_self_disjunctive_event_trigger(
 )> {
     // The condition must describe the source object itself.
     if !matches!(
-        scan_delayed_subject(condition_text),
+        scan_delayed_subject(condition_text, TargetFilter::SelfRef),
         Some(TargetFilter::SelfRef)
     ) {
         return None;
@@ -5144,6 +5145,18 @@ fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
     if let Some(els) = ability.else_ability.as_deref_mut() {
         rebind_triggering_source_to_parent_target(els);
     }
+}
+
+/// CR 603.7: does this chunk open with an embedded delayed-trigger head
+/// ("when …, …" / "whenever …, …")? Such a chunk is a delayed triggered ability
+/// whose effect is everything after its condition, so every trailing modifier of
+/// the sentence belongs to that effect rather than to the creating clause.
+fn opens_embedded_delayed_trigger(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let opens = alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever ")))
+        .parse(lower.as_str())
+        .is_ok();
+    opens
 }
 
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
@@ -5292,7 +5305,17 @@ fn try_parse_inline_delayed_trigger(
 /// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
 /// "target creature" → ParentTarget (named target in the condition).
 fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) -> TargetFilter {
-    let subject = scan_delayed_subject(condition_text).unwrap_or_else(|| {
+    // CR 608.2c + CR 603.7c: a bare "it" names the nearest antecedent. When an
+    // earlier clause of this chain declared a target ("Choose up to one other
+    // target creature. When it dies this turn, …"; "Target creature gets +3/+0
+    // until end of turn. When it dies this turn, …"), the pronoun is that
+    // target — the chunk context publishes it as `ParentTarget` — not the
+    // ability's source. With no chain-local referent it stays the source.
+    let it_referent = match ctx.object_pronoun_ref {
+        Some(TargetFilter::ParentTarget) => TargetFilter::ParentTarget,
+        _ => TargetFilter::SelfRef,
+    };
+    let subject = scan_delayed_subject(condition_text, it_referent).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized delayed subject".into(),
             text: condition_text.trim().into(),
@@ -48587,7 +48610,18 @@ fn parse_effect_chain_ir_body(
             continue;
         }
 
-        let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        // CR 603.7 + CR 603.7a: an embedded delayed trigger ("when it dies this
+        // turn, return that card … at the beginning of the next end step") owns
+        // the rest of its sentence as its effect, so a trailing timing phrase
+        // times what the delayed trigger DOES once it triggers, not the
+        // creation of the delayed trigger itself. Leave the suffix on the text;
+        // the inline delayed-trigger parser re-parses the body as its own chain,
+        // which peels the suffix there and wraps only the body.
+        let (text_no_temporal, delayed_condition) = if opens_embedded_delayed_trigger(&text) {
+            (text.as_str(), None)
+        } else {
+            strip_temporal_suffix(&text)
+        };
         let (text_no_qty, mut multi_target) =
             if imperative::aggregate_return_choice_cardinality(text_no_temporal, ctx).is_some() {
                 (text_no_temporal.to_string(), None)
