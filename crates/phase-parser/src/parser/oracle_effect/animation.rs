@@ -889,7 +889,15 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
     if core_types.is_empty() && subtypes.is_empty() {
         return (supertypes, Vec::new());
     }
-    if core_types.is_empty() && infer_creature {
+    // CR 208.3 + CR 301.7a: a P/T-bearing "becomes a 3/3 Dragon" implies the
+    // creature type only when some named subtype can be a creature type
+    // (CR 205.3m). A list made only of other types' subtypes ("become 3/3
+    // Vehicles", CR 205.3g) names a noncreature permanent with printed P/T —
+    // a Vehicle has that P/T only while it's also a creature (crewed).
+    let names_creature_subtype = subtypes
+        .iter()
+        .any(|subtype| crate::types::card_type::noncreature_subtype_set(subtype).is_none());
+    if core_types.is_empty() && infer_creature && names_creature_subtype {
         push_unique_string(&mut core_types, "Creature");
     }
 
@@ -1166,6 +1174,68 @@ mod test_den_bugbear {
         assert_eq!(
             parse_animation_type_parts("in addition to its other types and gains flying", false).1,
             Vec::<String>::new()
+        );
+    }
+
+    /// CR 208.3 + CR 301.7a + CR 205.3g: a P/T-bearing type list made only of
+    /// noncreature subtypes ("become 3/3 Vehicles") does not imply Creature; a
+    /// list naming any creature type still does, and an explicit core type wins.
+    #[test]
+    fn animation_types_infer_creature_only_from_creature_subtypes() {
+        assert_eq!(
+            parse_animation_type_parts("Vehicle", true).1,
+            vec!["Vehicle"]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Vehicles in addition to their other types", true).1,
+            vec!["Vehicle"]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Equipment", true).1,
+            vec!["Equipment"]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Dragon Vehicle", true).1,
+            vec!["Creature", "Dragon", "Vehicle"]
+        );
+        assert_eq!(
+            parse_animation_type_parts("artifact creature Vehicle", true).1,
+            vec!["Artifact", "Creature", "Vehicle"]
+        );
+    }
+
+    /// New New York: "noncreature artifacts you control become 3/3 Vehicles in
+    /// addition to their other types and gain flying, haste, and crew 1" sets
+    /// 3/3 and adds the Vehicle subtype without making them creatures
+    /// (CR 301.7a: a Vehicle has P/T only while it's also a creature).
+    #[test]
+    fn become_pt_vehicles_does_not_add_creature_type() {
+        use crate::types::ability::{ContinuousModification, Effect};
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
+            "New New York",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let trigger = parsed.triggers.first().expect("combat trigger");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = trigger.execute.as_ref().expect("execute").effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", trigger.execute);
+        };
+        let mods = &static_abilities[0].modifications;
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Vehicle".into()
+        }));
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddType { .. })),
+            "a Vehicle is not a creature until crewed: {mods:?}"
         );
     }
 

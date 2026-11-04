@@ -4,6 +4,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::RandomDraw;
+use crate::types::player::PlayerId;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -56,52 +57,61 @@ pub fn resolve(
         return Ok(());
     }
 
-    let target_player = match &shuffle_target {
-        // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .unwrap_or(ability.controller),
-        // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
-        TargetFilter::ParentTargetSlot { index } => {
-            match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
-            {
-                Some(TargetRef::Player(player)) => player,
-                Some(TargetRef::Object(_)) => {
-                    let Some(player) =
-                        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
-                    else {
-                        return Ok(());
-                    };
-                    player
+    // CR 701.24a + CR 608.2c: "The owners of those cards shuffle them into
+    // their libraries" — a `ParentTargetOwner` shuffle names every distinct
+    // owner of the parent's object targets, and each of those players shuffles
+    // their own library once (APNAP order, CR 101.4). A single-object referent
+    // ("its owner's library") is the one-owner case of the same rule. With no
+    // object targets the anaphor binds through the context fallbacks below.
+    let parent_owners = match &shuffle_target {
+        TargetFilter::ParentTargetOwner => parent_target_owners(state, ability),
+        _ => None,
+    };
+    let target_players = if let Some(owners) = parent_owners {
+        owners
+    } else {
+        let target_player = match &shuffle_target {
+            // CR 400.3: "its owner's library" resolves to the owner of source_id.
+            TargetFilter::Owner => state
+                .objects
+                .get(&ability.source_id)
+                .map(|obj| obj.owner)
+                .unwrap_or(ability.controller),
+            // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
+            TargetFilter::ParentTargetSlot { index } => {
+                match crate::game::targeting::resolve_live_parent_slot_from_root(
+                    state, ability, *index,
+                ) {
+                    Some(TargetRef::Player(player)) => player,
+                    Some(TargetRef::Object(_)) => {
+                        let Some(player) =
+                            super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                        else {
+                            return Ok(());
+                        };
+                        player
+                    }
+                    None => return Ok(()),
                 }
-                None => return Ok(()),
             }
-        }
-        // CR 608.2b: a declared player whose target was illegal names no library.
-        _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
-            Some(player) => player,
-            None => return Ok(()),
-        },
+            // CR 608.2b: a declared player whose target was illegal names no library.
+            _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
+                Some(player) => player,
+                None => return Ok(()),
+            },
+        };
+        vec![target_player]
     };
 
     // CR 701.24a: the target player must exist before any shuffle logic runs.
     // Validate first, unconditionally, so an unknown player is rejected even
     // when a broad "Can't shuffle" static would otherwise suppress the shuffle.
-    if !state
-        .players
+    if !target_players
         .iter()
-        .any(|player| player.id == target_player)
+        .all(|target| state.players.iter().any(|player| player.id == *target))
     {
         return Err(EffectError::PlayerNotFound);
     }
-
-    // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
-    // if a player would shuffle their library and can't, they don't shuffle.
-    // The effect itself still resolves (EffectResolved fires below).
-    let suppressed =
-        crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
@@ -109,14 +119,58 @@ pub fn resolve(
         subject: None,
     });
 
-    if !suppressed {
-        // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
-        // event order while the shared resolved-command authority owns the
-        // semantic library permutation and entropy receipt.
-        crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+    for target_player in target_players {
+        // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
+        // if a player would shuffle their library and can't, they don't shuffle.
+        // The effect itself still resolves (EffectResolved fires above).
+        let suppressed = crate::game::static_abilities::player_has_static_other(
+            state,
+            target_player,
+            "CantShuffle",
+        );
+        if !suppressed {
+            // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
+            // event order while the shared resolved-command authority owns the
+            // semantic library permutation and entropy receipt.
+            crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+        }
     }
 
     Ok(())
+}
+
+/// CR 108.3 + CR 608.2c + CR 101.4: The distinct owners of the parent
+/// instruction's object targets, in APNAP order. Player targets are skipped
+/// (mirroring [`crate::game::ability_utils::parent_target_owner`]), and an
+/// object that ceased to exist answers through last-known information
+/// (CR 608.2h). `None` when the ability carries no object target, so the
+/// caller falls back to the context referent (a dies trigger's "it").
+fn parent_target_owners(state: &GameState, ability: &ResolvedAbility) -> Option<Vec<PlayerId>> {
+    if !ability
+        .targets
+        .iter()
+        .any(|target| matches!(target, TargetRef::Object(_)))
+    {
+        return None;
+    }
+    let owners: Vec<PlayerId> = ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => state
+                .objects
+                .get(id)
+                .map(|obj| obj.owner)
+                .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    Some(
+        crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|player| owners.contains(player))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -537,5 +591,55 @@ mod tests {
             p0_lib_before.len(),
             "owner's library size preserved under shuffle"
         );
+    }
+
+    /// CR 701.24a + CR 608.2c: a `ParentTargetOwner` shuffle over several parent
+    /// object targets shuffles each distinct owner's library exactly once, in
+    /// APNAP order, and never a player who owns none of them; player targets
+    /// name no owner.
+    #[test]
+    fn shuffle_parent_target_owner_shuffles_each_distinct_owner_once() {
+        use crate::types::events::PlayerActionKind;
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let mut card = |owner: u8, id: u64| {
+            create_object(
+                &mut state,
+                CardId(id),
+                PlayerId(owner),
+                format!("Card {id}"),
+                Zone::Library,
+            )
+        };
+        let first = card(2, 1);
+        let second = card(1, 2);
+        let third = card(2, 3);
+        let ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetOwner,
+            },
+            vec![
+                TargetRef::Object(first),
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Object(second),
+                TargetRef::Object(third),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let shuffled: Vec<PlayerId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shuffled, vec![PlayerId(1), PlayerId(2)]);
     }
 }

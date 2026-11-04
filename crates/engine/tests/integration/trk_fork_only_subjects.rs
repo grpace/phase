@@ -7,7 +7,10 @@
 //!   becoming the `Warrior` creature type (CR 205.3m / CR 205.1b).
 //! - Those Old Scientists — Saga whose reminder text spans a line break
 //!   (MTGJSON prints "after your draw\nstep"), so chapter headers must still
-//!   be recognized (CR 714.2b).
+//!   be recognized (CR 714.2b); chapter III shuffles each distinct owner's
+//!   library (CR 701.24a).
+//! - Ensign Harry Kim, Operations — printed short self-name "Ensign Kim".
+//! - New New York — "become 3/3 Vehicles" adds no creature type (CR 301.7a).
 //!
 //! Every test builds its card from the verbatim Oracle text through
 //! `from_oracle_text`, so it exercises the same parser the card-data export
@@ -15,14 +18,17 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, TargetSelectionSlot, WaitingFor};
+use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::game_state::{
+    CastPaymentMode, CounterCostChoice, PayCostKind, TargetSelectionSlot, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -330,52 +336,62 @@ fn musiker_does_not_trigger_on_another_creature_entering() {
 // Worf, Intelligence Contractor
 // ---------------------------------------------------------------------------
 
-/// Answer Worf's trigger target prompt. Object slots take the next `picks`
-/// creature that is legal there; any player slot the engine surfaces for
-/// "that player" takes the controller of the next unpicked creature (and must
-/// only ever offer opponents). Returns each object slot's legal targets.
+/// Answer Worf's trigger target prompt, taking the next `picks` creature that
+/// is legal at each prompt. CR 115.10a + CR 115.1d: the per-opponent "that
+/// player" binder is not a target, so the engine announces it itself — every
+/// prompt the controller sees must be an optional object-only creature slot.
+/// Returns each prompted slot's legal targets, in prompt order.
 fn drive_worf_targets(runner: &mut GameRunner, picks: &[ObjectId]) -> Vec<Vec<TargetRef>> {
     let (chooser, _) = trigger_target_slots(runner);
     assert_eq!(chooser, P0);
     let mut remaining: Vec<ObjectId> = picks.to_vec();
-    let mut object_slots = Vec::new();
+    let mut prompts = Vec::new();
     for _ in 0..16 {
-        if !matches!(
-            runner.state().waiting_for,
-            WaitingFor::TriggerTargetSelection { .. }
-        ) {
+        let WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
             break;
-        }
-        let legal = current_slot_legal(runner);
-        let player_slot = legal.iter().all(|t| matches!(t, TargetRef::Player(_)));
-        if player_slot && !legal.is_empty() {
-            assert!(
-                !legal.contains(&TargetRef::Player(P0)),
-                "only opponents may be chosen as \"that player\": {legal:?}"
-            );
-            let next_controller = remaining
-                .first()
-                .map(|id| TargetRef::Player(runner.state().objects[id].controller));
-            let pick = next_controller
-                .filter(|p| legal.contains(p))
-                .unwrap_or_else(|| legal[0].clone());
-            runner
-                .act(GameAction::ChooseTarget { target: Some(pick) })
-                .expect("player slot accepted");
-        } else {
-            let pick = remaining
-                .iter()
-                .position(|id| legal.contains(&TargetRef::Object(*id)))
-                .map(|i| remaining.remove(i));
-            object_slots.push(legal);
-            choose(runner, pick);
-        }
+        };
+        let slot = &target_slots[selection.current_slot];
+        assert!(slot.optional, "\"up to one target creature\" is optional");
+        assert!(
+            !slot.legal_targets.is_empty()
+                && slot
+                    .legal_targets
+                    .iter()
+                    .all(|t| matches!(t, TargetRef::Object(_))),
+            "every prompt is an object-only creature slot: {:?}",
+            slot.legal_targets
+        );
+        let legal = slot.legal_targets.clone();
+        let pick = remaining
+            .iter()
+            .position(|id| legal.contains(&TargetRef::Object(*id)))
+            .map(|i| remaining.remove(i));
+        prompts.push(legal);
+        choose(runner, pick);
     }
     assert!(
         remaining.is_empty(),
         "every intended creature must be targetable; unpicked: {remaining:?}"
     );
-    object_slots
+    prompts
+}
+
+/// An object-only slot's legal targets as a sorted id set.
+fn object_set(targets: &[TargetRef]) -> Vec<ObjectId> {
+    let mut ids: Vec<ObjectId> = targets
+        .iter()
+        .map(|t| match t {
+            TargetRef::Object(id) => *id,
+            TargetRef::Player(p) => panic!("unexpected player target {p:?}"),
+        })
+        .collect();
+    ids.sort_by_key(|id| id.0);
+    ids
 }
 
 #[test]
@@ -412,16 +428,12 @@ fn worf_steals_untaps_and_makes_a_hasty_warrior_until_end_of_turn() {
     // CR 115.1d: "up to one target creature that player controls with mana
     // value 3 or less" — only the opponent's MV ≤ 3 creature is legal.
     let creature_slots = drive_worf_targets(&mut runner, &[small]);
-    assert_eq!(creature_slots.len(), 1, "one creature slot per opponent");
-    let legal = &creature_slots[0];
-    assert!(legal.contains(&TargetRef::Object(small)), "MV 3 is legal");
-    assert!(
-        !legal.contains(&TargetRef::Object(big)),
-        "MV 4 is not legal"
-    );
-    assert!(
-        !legal.contains(&TargetRef::Object(mine)),
-        "own creature is not legal"
+    // Exactly one creature slot for the one opponent, offering exactly that
+    // opponent's MV ≤ 3 creature — not the MV 4 one, nor Worf's controller's.
+    assert_eq!(
+        creature_slots,
+        vec![vec![TargetRef::Object(small)]],
+        "big = {big:?}, mine = {mine:?}"
     );
     pass_until_prompt_or_empty(&mut runner);
     assert_settled(&runner);
@@ -455,8 +467,9 @@ fn worf_steals_untaps_and_makes_a_hasty_warrior_until_end_of_turn() {
 }
 
 /// CR 115.1d: "for each opponent, ... up to one target creature
-/// that player controls" — with two opponents Worf can take one creature from
-/// each of them.
+/// that player controls" — with two opponents Worf gets exactly one creature
+/// slot per opponent, each offering exactly that opponent's MV ≤ 3 creatures,
+/// and can take one creature from each of them.
 #[test]
 fn worf_takes_one_creature_from_each_opponent() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -466,19 +479,35 @@ fn worf_takes_one_creature_from_each_opponent() {
         .add_creature_to_hand_from_oracle(P0, WORF_NAME, 3, 2, WORF_ORACLE)
         .with_mana_cost(ManaCost::zero())
         .id();
-    let from_p1 = scenario
-        .add_creature(P1, "Left Bear", 2, 2)
-        .with_mana_cost(ManaCost::generic(2))
-        .id();
-    let from_p2 = scenario
-        .add_creature(p2, "Right Bear", 2, 2)
-        .with_mana_cost(ManaCost::generic(2))
-        .id();
+    let mut creature = |owner: PlayerId, name: &str, mv: u32| {
+        scenario
+            .add_creature(owner, name, 2, 2)
+            .with_mana_cost(ManaCost::generic(mv))
+            .id()
+    };
+    let from_p1 = creature(P1, "Left Bear", 2);
+    let other_p1 = creature(P1, "Left Cub", 3);
+    let big_p1 = creature(P1, "Left Giant", 4);
+    let from_p2 = creature(p2, "Right Bear", 1);
+    let big_p2 = creature(p2, "Right Giant", 5);
+    let mine = creature(P0, "Own Bear", 1);
     let mut runner = scenario.build();
 
     cast_from_hand(&mut runner, worf);
     pass_until_prompt_or_empty(&mut runner);
-    drive_worf_targets(&mut runner, &[from_p1, from_p2]);
+    let prompts = drive_worf_targets(&mut runner, &[from_p1, from_p2]);
+    let mut prompts: Vec<Vec<ObjectId>> = prompts.iter().map(|p| object_set(p)).collect();
+    prompts.sort_by_key(|set| set.first().map(|id| id.0));
+    let mut expected = vec![
+        object_set(&[TargetRef::Object(from_p1), TargetRef::Object(other_p1)]),
+        vec![from_p2],
+    ];
+    expected.sort_by_key(|set| set.first().map(|id| id.0));
+    assert_eq!(
+        prompts, expected,
+        "one slot per opponent, each exactly that opponent's MV ≤ 3 creatures \
+         (excluded: {big_p1:?}, {big_p2:?}, {mine:?})"
+    );
     pass_until_prompt_or_empty(&mut runner);
     assert_settled(&runner);
 
@@ -487,6 +516,11 @@ fn worf_takes_one_creature_from_each_opponent() {
         assert_eq!(obj.controller, P0, "{} was stolen", obj.name);
         assert!(obj.card_types.subtypes.iter().any(|s| s == "Warrior"));
         assert!(obj.has_keyword(&Keyword::Haste));
+    }
+    for id in [other_p1, big_p1, big_p2] {
+        let obj = &runner.state().objects[&id];
+        assert_ne!(obj.controller, P0, "{} was not chosen", obj.name);
+        assert!(!obj.card_types.subtypes.iter().any(|s| s == "Warrior"));
     }
 }
 
@@ -643,10 +677,15 @@ fn scientists_chapters_two_and_three_then_sacrifice() {
         choose(&mut runner, pick);
     }
     assert!(wanted.is_empty(), "both graveyard cards were targeted");
-    pass_until_prompt_or_empty(&mut runner);
+    let mut events = Vec::new();
+    while !runner.state().stack.is_empty() {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
     assert_settled(&runner);
 
-    // CR 701.24a: each owner shuffles their card into their own library.
+    // CR 701.24a: each owner shuffles their card into their own library, and
+    // each of those libraries is shuffled exactly once (APNAP order).
+    assert_eq!(shuffle_instruction_players(&events), vec![P0, P1]);
     assert_eq!(runner.state().objects[&their_card].zone, Zone::Library);
     assert!(runner.state().players[1].library.contains(&their_card));
     assert_eq!(runner.state().objects[&reshuffled_mine].zone, Zone::Library);
@@ -659,4 +698,352 @@ fn scientists_chapters_two_and_three_then_sacrifice() {
     // CR 714.4: with lore ≥ final chapter and no chapter on the stack, the
     // Saga is sacrificed.
     assert_eq!(runner.state().objects[&saga].zone, Zone::Graveyard);
+}
+
+/// The players whose library shuffled, in event order.
+fn shuffled_libraries(events: &[GameEvent]) -> Vec<PlayerId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The players whose library the explicit Shuffle instruction shuffled: the
+/// `ShuffledLibrary` events after that instruction's `EffectResolved`. (The
+/// preceding move into a library carries the engine's own per-card library
+/// randomization, which is not the instruction under test.)
+fn shuffle_instruction_players(events: &[GameEvent]) -> Vec<PlayerId> {
+    let start = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )
+        })
+        .map_or(events.len(), |i| i + 1);
+    events[start..]
+        .iter()
+        .take_while(|event| {
+            !matches!(
+                event,
+                GameEvent::EffectResolved { kind, .. } if *kind != EffectKind::Shuffle
+            )
+        })
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Chapter III in a three-player game: P0's Saga already has two lore counters,
+/// so P0's precombat main phase adds the third.
+fn scientists_chapter_three_scenario() -> (GameScenario, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Upkeep);
+    for player in [P0, P1, PlayerId(2)] {
+        scenario.with_library_top(player, &["Island"; 8]);
+    }
+    let saga = scenario
+        .add_creature(P0, SCIENTISTS_NAME, 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(SCIENTISTS_ORACLE)
+        .id();
+    scenario.with_counter(saga, CounterType::Lore, 2);
+    (scenario, saga)
+}
+
+/// CR 701.24a + CR 608.2c: "The owners of those cards shuffle them into their
+/// libraries" — each distinct owner of a chosen card shuffles their own
+/// library exactly once (APNAP order), a player who owns no chosen card does
+/// not shuffle, and choosing zero cards shuffles no library.
+#[test]
+fn scientists_chapter_three_shuffles_each_distinct_owner_once() {
+    let p2 = PlayerId(2);
+    // (owner of first card, owner of second card, pick?) → expected shufflers.
+    let cases: [(PlayerId, PlayerId, bool, Vec<PlayerId>); 4] = [
+        (P1, p2, true, vec![P1, p2]),
+        (p2, P1, true, vec![P1, p2]),
+        (P1, P1, true, vec![P1]),
+        (P1, p2, false, vec![]),
+    ];
+    for (first_owner, second_owner, pick, expected) in cases {
+        let (mut scenario, saga) = scientists_chapter_three_scenario();
+        let first = scenario
+            .add_creature_to_graveyard(first_owner, "First Card", 2, 2)
+            .id();
+        let second = scenario
+            .add_creature_to_graveyard(second_owner, "Second Card", 2, 2)
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert_eq!(lore(&runner, saga), 3);
+        pass_until_prompt_or_empty(&mut runner);
+
+        let (chooser, slots) = trigger_target_slots(&runner);
+        assert_eq!(chooser, P0);
+        assert!(slots[0].optional, "up to two targets");
+        if pick {
+            for id in [first, second] {
+                assert!(current_slot_legal(&runner).contains(&TargetRef::Object(id)));
+                choose(&mut runner, Some(id));
+            }
+        } else {
+            choose(&mut runner, None);
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "targets announced, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.state().stack.len(), 1, "chapter III on the stack");
+
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert!(runner.state().stack.is_empty(), "chapter III resolved");
+
+        let case = format!("case ({first_owner:?}, {second_owner:?}, pick={pick})");
+        assert_eq!(shuffle_instruction_players(&events), expected, "{case}");
+        // No library outside the chosen cards' owners is shuffled at all, and
+        // choosing no cards shuffles nothing.
+        let shuffled = shuffled_libraries(&events);
+        assert!(
+            shuffled.iter().all(|p| expected.contains(p)),
+            "{case}: {shuffled:?}"
+        );
+        assert!(!shuffled.contains(&P0), "{case}: P0 owns no chosen card");
+        for (id, owner) in [(first, first_owner), (second, second_owner)] {
+            let zone = if pick { Zone::Library } else { Zone::Graveyard };
+            assert_eq!(runner.state().objects[&id].zone, zone);
+            assert_eq!(
+                runner.state().players[owner.0 as usize]
+                    .library
+                    .contains(&id),
+                pick,
+                "each card goes to its owner's library"
+            );
+        }
+        // CR 714.4: the Saga is sacrificed after its final chapter resolves.
+        assert_eq!(runner.state().objects[&saga].zone, Zone::Graveyard);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// New New York (a Plane whose subtype-list animation shares the parser path)
+// ---------------------------------------------------------------------------
+
+const NEW_NEW_YORK_ORACLE: &str = "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.\nWhenever chaos ensues, create a Treasure token and a 2/2 white Alien creature token.";
+
+/// CR 208.3 + CR 301.7a + CR 702.122a: "noncreature artifacts you control
+/// become 3/3 Vehicles … and gain … crew 1" makes them noncreature Vehicles
+/// (no power or toughness while not creatures); crewing one makes it an
+/// artifact creature, and only then does the 3/3 apply.
+#[test]
+fn new_new_york_vehicles_are_not_creatures_until_crewed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "New New York", NEW_NEW_YORK_ORACLE);
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Plain Relic", "")
+        .id();
+    let crewmate = scenario.add_creature(P0, "Crewmate", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // Leaving the main phase begins combat, and the trigger fires.
+    advance_until(&mut runner, |r| !r.state().stack.is_empty());
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert!(runner.state().stack.is_empty(), "the trigger resolved");
+
+    {
+        let obj = &runner.state().objects[&relic];
+        assert!(obj.card_types.subtypes.iter().any(|s| s == "Vehicle"));
+        assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+        assert!(
+            !obj.card_types.core_types.contains(&CoreType::Creature),
+            "a Vehicle is not a creature until crewed"
+        );
+        assert!(obj.has_keyword(&Keyword::Flying));
+        assert!(obj.has_keyword(&Keyword::Haste));
+        assert!(obj.has_keyword(&Keyword::Crew {
+            power: 1,
+            once_per_turn: None,
+        }));
+    }
+    // The crew creature is not a noncreature artifact, so it is unchanged.
+    let crew_obj = &runner.state().objects[&crewmate];
+    assert!(!crew_obj.card_types.subtypes.iter().any(|s| s == "Vehicle"));
+
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: relic,
+            creature_ids: vec![],
+        })
+        .expect("enter crew mode");
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: relic,
+            creature_ids: vec![crewmate],
+        })
+        .expect("crew 1 with a 2-power creature");
+    pass_until_prompt_or_empty(&mut runner);
+    assert!(runner.state().stack.is_empty(), "crew resolved");
+
+    let obj = &runner.state().objects[&relic];
+    assert!(
+        obj.card_types.core_types.contains(&CoreType::Creature),
+        "crewed Vehicle is an artifact creature"
+    );
+    assert_eq!((obj.power, obj.toughness), (Some(3), Some(3)));
+    assert!(
+        runner.state().objects[&crewmate].tapped,
+        "crew taps the crewer"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ensign Harry Kim, Operations
+// ---------------------------------------------------------------------------
+
+const KIM_NAME: &str = "Ensign Harry Kim, Operations";
+const KIM_ORACLE: &str = "Whenever another creature you control enters, if it has greater power than Ensign Kim, put a +1/+1 counter on Ensign Kim.\n{2}, Remove two +1/+1 counters from among creatures you control: Draw a card.";
+
+fn add_kim(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature(P0, KIM_NAME, 1, 2)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Officer"])
+        .from_oracle_text(KIM_ORACLE)
+        .id()
+}
+
+fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 201.5c + CR 603.4: "Ensign Kim" is the printed short self-name, so the
+/// intervening "if it has greater power than Ensign Kim" compares the entering
+/// creature against Kim's own power — a greater-power entrant grows Kim, an
+/// equal- or lower-power one does not, and the counter goes on Kim.
+#[test]
+fn kim_grows_only_when_a_greater_power_creature_enters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kim = add_kim(&mut scenario);
+    let high = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let equal = scenario
+        .add_creature_to_hand(P0, "Equal Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let low = scenario
+        .add_creature_to_hand(P0, "Llanowar Elves", 1, 1)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    cast_from_hand(&mut runner, high);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&high].zone, Zone::Battlefield);
+    assert_eq!(plus_one_counters(&runner, kim), 1, "2 power > Kim's 1");
+    assert_eq!(plus_one_counters(&runner, high), 0, "the counter is Kim's");
+    assert_eq!(runner.state().objects[&kim].power, Some(2));
+
+    // Kim is now 2/3: neither a 2-power nor a 1-power entrant is greater.
+    for card in [equal, low] {
+        cast_from_hand(&mut runner, card);
+        pass_until_prompt_or_empty(&mut runner);
+        assert_settled(&runner);
+        assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+        assert_eq!(plus_one_counters(&runner, kim), 1);
+    }
+}
+
+/// CR 602.2b + CR 601.2h: "{2}, Remove two +1/+1 counters from among creatures
+/// you control: Draw a card" — the counters may come from two different
+/// creatures, and the draw happens once the whole cost is paid.
+#[test]
+fn kim_activation_removes_counters_from_among_creatures_and_draws() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kim = add_kim(&mut scenario);
+    let donor = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.with_counter(kim, CounterType::Plus1Plus1, 1);
+    scenario.with_counter(donor, CounterType::Plus1Plus1, 1);
+    let drawn = scenario
+        .add_spell_to_library_top(P0, "Drawn Card", true)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: kim,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Kim");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::RemoveCounter { .. },
+                ..
+            }
+        ),
+        "expected the remove-counter cost prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseRemoveCounterCostDistribution {
+            distribution: [kim, donor]
+                .into_iter()
+                .map(|object_id| CounterCostChoice {
+                    object_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                })
+                .collect(),
+        })
+        .expect("remove one counter from each");
+    // CR 601.2h: the whole cost is paid at activation; nothing is drawn yet.
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Library);
+    pass_until_prompt_or_empty(&mut runner);
+    assert_settled(&runner);
+
+    assert_eq!(plus_one_counters(&runner, kim), 0);
+    assert_eq!(plus_one_counters(&runner, donor), 0);
+    assert_eq!(runner.state().objects[&drawn].zone, Zone::Hand);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
 }

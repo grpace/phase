@@ -26072,8 +26072,19 @@ fn resolve_chain_body(
             // ("Return it", "that creature", …) has no antecedent. Skip the
             // consumer but keep resolving trailing sequential siblings (Samwise
             // the Stouthearted → Ring tempts you).
-            if let Some(trailing) = sub.sub_ability.as_ref() {
-                let mut trailing_resolved = trailing.as_ref().clone();
+            //
+            // CR 608.2c + CR 701.24a: a trailing instruction that names the same
+            // declined antecedent (Those Old Scientists' "The owners of those
+            // cards shuffle them into their libraries") has no referent either,
+            // so it is skipped too rather than falling back to a context player.
+            let mut trailing = sub.sub_ability.as_deref();
+            while let Some(node) = trailing
+                .filter(|node| node.targets.is_empty() && effect_refs_parent_target(&node.effect))
+            {
+                trailing = node.sub_ability.as_deref();
+            }
+            if let Some(trailing) = trailing {
+                let mut trailing_resolved = trailing.clone();
                 apply_parent_chain_context(
                     &mut trailing_resolved,
                     ability,
