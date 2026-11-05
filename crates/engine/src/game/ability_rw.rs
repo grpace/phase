@@ -3135,6 +3135,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
         // frozen event-context tag.
         | ContinuousModification::CopyChosen
+        | ContinuousModification::AddCopiedCountersOnEnter
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
