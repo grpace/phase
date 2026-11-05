@@ -16219,6 +16219,50 @@ fn filter_refs_parent_target_metadata(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2b + CR 608.2c: Whether some slot of a later instruction names ONLY
+/// the parent's target, so the instruction has no referent once that target is
+/// absent (an optional head that chose zero targets, CR 115.6). Narrower than
+/// `effect_refs_parent_target`, which is true when any leg mentions the parent:
+/// "exile a nonland card from their hand or the chosen creature" still has the
+/// hand-card alternative when no creature was chosen, and that part of the
+/// instruction still happens.
+fn effect_refs_only_parent_target(effect: &Effect) -> bool {
+    effect_parent_ref_slots(effect)
+        .iter()
+        .any(|filter| filter_refs_only_parent_target(filter))
+}
+
+/// CR 608.2b + CR 608.2c: Whether every object or player this filter can match
+/// is defined by the parent's target: a bare parent reference, a population
+/// relative to the parent (its controller's permanents, what is attached to
+/// it), a disjunction whose every alternative is such a filter, or a
+/// conjunction with one such conjunct. An exclusion of the parent
+/// (`Not`, `DistinctFrom`) leaves an independent population, so it is not.
+fn filter_refs_only_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner => true,
+        TargetFilter::Typed(typed) => {
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) || typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::AttachedTo {
+                        to: crate::types::ability::AttachmentReferent::Host { filter },
+                    } if filter_refs_only_parent_target(filter)
+                )
+            })
+        }
+        TargetFilter::Or { filters } => filters.iter().all(filter_refs_only_parent_target),
+        TargetFilter::And { filters } => filters.iter().any(filter_refs_only_parent_target),
+        _ => false,
+    }
+}
+
 /// CR 115.6: True when the resolving ability head permits zero targets and the
 /// controller chose none (no `TargetRef::Object` in `ability.targets`).
 fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool {
@@ -26170,7 +26214,7 @@ fn resolve_chain_body(
             progress = resolve_ability_chain_step(state, &sub_with_referent, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && ability.targets.is_empty()
-            && effect_refs_parent_target(&sub.effect)
+            && effect_refs_only_parent_target(&sub.effect)
             && optional_head_declined_all_object_targets(ability)
         {
             // CR 115.6 + CR 608.2c (issue #5287): Optional multi-target / up-to-one
@@ -26178,8 +26222,23 @@ fn resolve_chain_body(
             // ("Return it", "that creature", …) has no antecedent. Skip the
             // consumer but keep resolving trailing sequential siblings (Samwise
             // the Stouthearted → Ring tempts you).
-            if let Some(trailing) = sub.sub_ability.as_ref() {
-                let mut trailing_resolved = trailing.as_ref().clone();
+            //
+            // CR 608.2c + CR 701.24a: a trailing instruction that names the same
+            // declined antecedent (Those Old Scientists' "The owners of those
+            // cards shuffle them into their libraries") has no referent either,
+            // so it is skipped too rather than falling back to a context player.
+            // CR 608.2b: only an instruction whose referent is WHOLLY the
+            // declined target is skipped; one with an independent alternative
+            // ("a nonland card from their hand or the chosen creature") still
+            // resolves against that alternative.
+            let mut trailing = sub.sub_ability.as_deref();
+            while let Some(node) = trailing.filter(|node| {
+                node.targets.is_empty() && effect_refs_only_parent_target(&node.effect)
+            }) {
+                trailing = node.sub_ability.as_deref();
+            }
+            if let Some(trailing) = trailing {
+                let mut trailing_resolved = trailing.clone();
                 apply_parent_chain_context(
                     &mut trailing_resolved,
                     ability,
@@ -55105,6 +55164,138 @@ mod tests {
         }));
         // Negative control: a plain filter is not a parent-target reference.
         assert!(!filter_refs_parent_target(&TargetFilter::Any));
+    }
+
+    /// CR 608.2b + CR 608.2c: `filter_refs_only_parent_target` holds when every
+    /// object the filter can match is defined by the parent's target — and not
+    /// when an independent alternative survives (Cloak and Dagger, Entwined's
+    /// "a nonland card from their hand or the chosen creature") or the parent is
+    /// only excluded.
+    #[test]
+    fn filter_refs_only_parent_target_requires_every_alternative_to_name_the_parent() {
+        let chosen_creature = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 1 },
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }])),
+            ],
+        };
+        let hand_card = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::TargetOpponent)
+                .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+        );
+        assert!(filter_refs_only_parent_target(&TargetFilter::ParentTarget));
+        assert!(filter_refs_only_parent_target(&chosen_creature));
+        assert!(filter_refs_only_parent_target(&TargetFilter::Or {
+            filters: vec![TargetFilter::ParentTarget, chosen_creature.clone()],
+        }));
+        assert!(filter_refs_only_parent_target(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::ParentTargetController)
+        )));
+
+        let either = TargetFilter::Or {
+            filters: vec![hand_card, chosen_creature.clone()],
+        };
+        assert!(
+            filter_refs_parent_target(&either),
+            "control: it mentions the parent"
+        );
+        assert!(!filter_refs_only_parent_target(&either));
+        assert!(!filter_refs_only_parent_target(&TargetFilter::Not {
+            filter: Box::new(TargetFilter::ParentTarget),
+        }));
+        assert!(!filter_refs_only_parent_target(&TargetFilter::Any));
+    }
+
+    /// CR 115.6 + CR 608.2b + CR 608.2c: after an optional head chooses zero
+    /// targets, the consumer whose only referent is that target is skipped, but
+    /// a trailing instruction with an independent alternative still resolves
+    /// against that alternative, and later siblings still run. Resolver-level
+    /// because Cloak and Dagger, Entwined (the printed composite) shares its
+    /// player target down the chain and so never reaches this branch through
+    /// the production path.
+    #[test]
+    fn declined_optional_target_keeps_trailing_instruction_with_independent_alternative() {
+        let mut state = GameState::new_two_player(42);
+        let creature = |state: &mut GameState, owner: u8, name: &str| {
+            let id = create_object(
+                state,
+                CardId(u64::from(owner) + 1),
+                PlayerId(owner),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            id
+        };
+        let theirs = creature(&mut state, 1, "Opponent Bear");
+        let mine = creature(&mut state, 0, "My Bear");
+        let source = ObjectId(100);
+
+        let gain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        // "… or that creature": the opponent-creature leg has a referent even
+        // with no chosen creature.
+        let destroy_either = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::Opponent),
+                        ),
+                        TargetFilter::ParentTarget,
+                    ],
+                },
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(gain);
+        let destroy_it = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(destroy_either);
+        let mut head = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(destroy_it);
+        head.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 1));
+        let life_before = state.players[0].life;
+
+        resolve_ability_chain(&mut state, &head, &mut Vec::new(), 0).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&theirs),
+            "the independent alternative still resolves"
+        );
+        assert!(
+            state.battlefield.contains(&mine),
+            "the declined target's consumer destroys nothing, and only the \
+             opponent's creature matches the alternative"
+        );
+        assert_eq!(state.players[0].life, life_before + 2, "later siblings run");
     }
 
     /// CR 702.174b + CR 608.2c: Longstalk Brawl — the +1/+1 counter is gated on

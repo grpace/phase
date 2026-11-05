@@ -8690,7 +8690,14 @@ fn uncovered_oracle_lines<'a>(
     lines
         .iter()
         .filter(|line| {
-            let norm = normalize_for_matching(&line.to_lowercase(), &card_name_lower);
+            // CR 201.5c: the parser recognizes a printed shortened name ("Dr.
+            // McCoy" for Dr. Leonard "Bones" McCoy) on the ORIGINAL-case text,
+            // because the compound short-name form keys on capitalized
+            // proper-name words. Run that same self-reference pass on the
+            // printed line before lowercasing, so the Oracle side carries the
+            // `~` its parsed `source_text` already carries.
+            let self_normalized = normalize_card_name_refs(line, card_name);
+            let norm = normalize_for_matching(&self_normalized.to_lowercase(), &card_name_lower);
             !sources
                 .iter()
                 .any(|src| src.contains(&norm) || norm.contains(src.as_str()))
@@ -9130,18 +9137,22 @@ fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
             continue;
         }
 
+        // CR 700.2: bullet points under a modal header are its modes, not
+        // separate lines. Checked BEFORE header detection: a mode's own text
+        // may itself say "choose up to one …" (Dr. Leonard "Bones" McCoy's
+        // "• Choose up to one other target creature. …") without opening a new
+        // modal list.
+        if in_modal && stripped.starts_with('\u{2022}') {
+            // Don't count — part of the preceding choose header
+            continue;
+        }
+
         // Check if this line contains a modal header ("choose one —", "choose two.", etc.)
         // Handles standalone headers, triggered modals ("when enters, choose one —"),
         // activated modals ("{cost}: choose one —"), and period-terminated ("choose three.")
         if is_modal_header_line(&lower) {
             effective.push(stripped.to_string());
             in_modal = true;
-            continue;
-        }
-
-        // Bullet points under a modal header are sub-items, not separate lines
-        if in_modal && stripped.starts_with('\u{2022}') {
-            // Don't count — part of the preceding choose header
             continue;
         }
 
@@ -24894,6 +24905,34 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     \u{2022} Return target nonland permanent card from your graveyard to the battlefield.";
         // 1 modal header; both bullets fold into the header.
         assert_eq!(effective_oracle_lines(text).len(), 1);
+    }
+
+    /// CR 700.2 + CR 201.5c: a mode whose own text says "choose up to one …"
+    /// still folds into its header, and the header's printed short name
+    /// ("Dr. McCoy") matches the parsed `~` source text.
+    #[test]
+    fn modal_bullet_saying_choose_folds_and_short_name_header_matches() {
+        let name = "Dr. Leonard \"Bones\" McCoy";
+        let text = "Flash\nWhen Dr. McCoy enters, choose one \u{2014}\n\
+                    \u{2022} Return target non-Doctor permanent card from your graveyard to your hand.\n\
+                    \u{2022} Choose up to one other target creature. When it dies this turn, draw a card.";
+        let lines = effective_oracle_lines(text);
+        assert_eq!(lines.len(), 2, "Flash + one modal header, got {lines:?}");
+        let trigger = ParsedItem {
+            category: ParseCategory::Trigger,
+            label: "ChangesZone".to_string(),
+            source_text: Some("When ~ enters".to_string()),
+            supported: true,
+            details: Vec::new(),
+            children: Vec::new(),
+            diagnoses: Vec::new(),
+            gap: None,
+        };
+        assert_eq!(
+            uncovered_oracle_lines(&lines, name, std::slice::from_ref(&trigger)),
+            vec!["Flash"],
+            "only the anonymous keyword line lacks source text"
+        );
     }
 
     /// CR 700.2 + CR 107.3m: dynamic modal headers ("choose up to X —",
