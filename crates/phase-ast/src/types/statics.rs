@@ -1495,6 +1495,16 @@ pub enum StaticMode {
         who: ProhibitionScope,
         cost: CostPaymentProhibition,
     },
+    /// CR 701.21a + CR 101.2: The scoped player(s) can't sacrifice permanents
+    /// matching `filter`, whether as a cost or during an effect's resolution.
+    ///
+    /// Quark, Humble Proprietor's class: "You can't sacrifice Treasure tokens."
+    /// Unlike [`StaticMode::CantPayCost`] this is not cost-scoped; the sacrifice
+    /// simply doesn't happen. `filter` is evaluated per candidate permanent.
+    CantSacrifice {
+        who: ProhibitionScope,
+        filter: TargetFilter,
+    },
     CantGainLife,
     CantLoseLife,
     /// CR 702.16: The scoped player(s) have protection from a quality —
@@ -2566,6 +2576,7 @@ pub enum StaticModeKind {
     ModifyActivationLimit,
     ActivateAsInstant,
     CantPayCost,
+    CantSacrifice,
     CantGainLife,
     CantLoseLife,
     PlayerProtection,
@@ -2731,6 +2742,7 @@ impl StaticMode {
             StaticMode::ModifyActivationLimit { .. } => StaticModeKind::ModifyActivationLimit,
             StaticMode::ActivateAsInstant { .. } => StaticModeKind::ActivateAsInstant,
             StaticMode::CantPayCost { .. } => StaticModeKind::CantPayCost,
+            StaticMode::CantSacrifice { .. } => StaticModeKind::CantSacrifice,
             StaticMode::CantGainLife => StaticModeKind::CantGainLife,
             StaticMode::CantLoseLife => StaticModeKind::CantLoseLife,
             StaticMode::PlayerProtection(..) => StaticModeKind::PlayerProtection,
@@ -2905,6 +2917,7 @@ impl StaticMode {
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::CantPayCost { .. }
+            | StaticMode::CantSacrifice { .. }
             | StaticMode::CantGainLife
             | StaticMode::CantLoseLife
             | StaticMode::PlayerProtection(_)
@@ -3211,6 +3224,7 @@ impl Hash for StaticMode {
             StaticMode::ModifyCost { .. }
             | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::CantPayCost { .. }
+            | StaticMode::CantSacrifice { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
             | StaticMode::DrawFromBottom { .. }
@@ -3292,6 +3306,7 @@ impl StaticMode {
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::CantPayCost { .. }
+            | StaticMode::CantSacrifice { .. }
             | StaticMode::CantGainLife
             | StaticMode::CantLoseLife
             | StaticMode::PlayerProtection(_)
@@ -3505,6 +3520,7 @@ impl fmt::Display for StaticMode {
                 None => write!(f, "ActivateAsInstant({cost_category:?})"),
             },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
+            StaticMode::CantSacrifice { who, .. } => write!(f, "CantSacrifice({who})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
             StaticMode::PlayerProtection(target) => {
